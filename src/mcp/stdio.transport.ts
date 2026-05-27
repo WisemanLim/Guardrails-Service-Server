@@ -69,7 +69,8 @@ async function dispatch(registry: ToolRegistryService, method: string, params: u
         tools: registry.list().map((t) => ({
           name: t.name,
           description: t.description,
-          inputSchema: { type: 'object', properties: t.inputSchema },
+          // t.inputSchema is already a complete JSON Schema object.
+          inputSchema: t.inputSchema,
         })),
       };
     case 'tools/call': {

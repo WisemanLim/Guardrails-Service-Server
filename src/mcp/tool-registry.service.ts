@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { OrchestratorService } from '../orchestrator/orchestrator.service';
 import { PolicyClient } from '../clients/policy.client';
 import { Runtime } from '../config/runtime';
@@ -11,6 +12,8 @@ export interface McpTool {
   handler: (args: unknown) => Promise<unknown>;
 }
 
+// ── zod schemas — single source of truth for both runtime parsing and the
+//    MCP-facing JSON Schema advertised in tools/list.inputSchema. ───────────
 const ValidateInputSchema = z.object({
   text: z.string(),
   domain: z.string().optional(),
@@ -31,6 +34,22 @@ const BundleSchema = z.object({
 
 const ExplainSchema = z.object({ decisionId: z.string() });
 
+const EmptySchema = z.object({});
+
+/**
+ * Convert a zod schema to a JSON Schema object suitable for the MCP
+ * `tools/list` response. `$refStrategy: 'none'` inlines everything so the
+ * client sees a flat, self-contained schema (no `$ref`/`definitions`).
+ */
+function jsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+  // Cast the call to avoid TS2589 (zod-to-json-schema's generic over the zod
+  // type instantiates excessively deep on nested/optional unions).
+  const convert = zodToJsonSchema as (s: unknown, opts?: unknown) => Record<string, unknown>;
+  const out = convert(schema, { target: 'jsonSchema7', $refStrategy: 'none' });
+  delete (out as { $schema?: unknown }).$schema;
+  return out;
+}
+
 @Injectable()
 export class ToolRegistryService {
   private readonly tools = new Map<string, McpTool>();
@@ -39,7 +58,7 @@ export class ToolRegistryService {
     this.register({
       name: 'validate_input',
       description: 'Evaluate guardrails on a user-supplied prompt before LLM invocation.',
-      inputSchema: ValidateInputSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ValidateInputSchema),
       handler: async (args) => {
         const parsed = ValidateInputSchema.parse(args);
         return this.orchestrator.validate(parsed, 'input');
@@ -49,7 +68,7 @@ export class ToolRegistryService {
     this.register({
       name: 'validate_output',
       description: 'Evaluate guardrails on a model-generated response before delivery.',
-      inputSchema: ValidateInputSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ValidateInputSchema),
       handler: async (args) => {
         const parsed = ValidateInputSchema.parse(args);
         return this.orchestrator.validate(parsed, 'output');
@@ -59,7 +78,7 @@ export class ToolRegistryService {
     this.register({
       name: 'sanitize_input',
       description: 'Return a normalized/redacted version of the input without a decision.',
-      inputSchema: ValidateInputSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ValidateInputSchema),
       handler: async (args) => {
         const parsed = ValidateInputSchema.parse(args);
         return this.orchestrator.sanitize(parsed, 'input');
@@ -69,7 +88,7 @@ export class ToolRegistryService {
     this.register({
       name: 'redact_output',
       description: 'Return a redacted version of the output text.',
-      inputSchema: ValidateInputSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ValidateInputSchema),
       handler: async (args) => {
         const parsed = ValidateInputSchema.parse(args);
         return this.orchestrator.sanitize(parsed, 'output');
@@ -79,7 +98,7 @@ export class ToolRegistryService {
     this.register({
       name: 'classify_privacy',
       description: 'Classify which PII categories appear in the input without enforcing an action.',
-      inputSchema: ValidateInputSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ValidateInputSchema),
       handler: async (args) => {
         const parsed = ValidateInputSchema.parse(args);
         const result = await this.orchestrator.validate(parsed, 'input');
@@ -90,7 +109,7 @@ export class ToolRegistryService {
     this.register({
       name: 'get_policy_bundle',
       description: 'Return the compiled policy bundle for a (domains, locale, ioType) triple.',
-      inputSchema: BundleSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(BundleSchema),
       handler: async (args) => {
         const parsed = BundleSchema.parse(args);
         const domains = parsed.domains ?? (parsed.domain ? [parsed.domain] : Runtime.enabledDomains);
@@ -101,7 +120,7 @@ export class ToolRegistryService {
     this.register({
       name: 'explain_decision',
       description: 'Look up the audit record for a prior decisionId.',
-      inputSchema: ExplainSchema.shape as unknown as Record<string, unknown>,
+      inputSchema: jsonSchema(ExplainSchema),
       handler: async (args) => {
         const parsed = ExplainSchema.parse(args);
         // Audit Service exposes /events/:id; we surface its raw row.
@@ -114,7 +133,7 @@ export class ToolRegistryService {
     this.register({
       name: 'health_check',
       description: 'Return service health and enabled-domain configuration.',
-      inputSchema: {},
+      inputSchema: jsonSchema(EmptySchema),
       handler: async () => ({
         status: 'ok',
         enabledDomains: Runtime.enabledDomains,

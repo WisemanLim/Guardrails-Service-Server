@@ -50,13 +50,17 @@ src/
 
 ### `MCP_TRANSPORT=http` (기본)
 
+- `POST /mcp` — **JSON-RPC 2.0 (Streamable HTTP)**. `mcp-remote`가 연결하는 표준 엔드포인트.
+  `initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call` 처리 (stateless).
+- `GET  /mcp` — 405 (서버→클라 GET 스트림 미사용; stateless POST만).
 - `POST /mcp/tools/:name` — flat REST (curl/테스트용)
-- `POST /mcp` — JSON-RPC 2.0
-- `GET  /mcp/sse` — SSE 스트림 (mcp-remote 브리지용)
-- `GET  /mcp/tools` — tool 카탈로그
+- `GET  /mcp/tools` — tool 카탈로그 (name/description/inputSchema)
+- `GET  /mcp/sse` — 레거시 SSE heartbeat (구버전 브리지 호환용)
 - `GET  /health`
 
-모든 `/mcp/*` 경로는 `x-api-key: $GUARDRAILS_API_KEY` 헤더 필요.
+인증은 `MCP_HTTP_AUTH`로 제어:
+- `optional` (기본) — 헤더 없이 허용. `mcp-remote http://<host>:<port>/mcp` 바로 연결 (LAN/게이트웨이 뒤 배포 가정).
+- `required` — `x-api-key: $GUARDRAILS_API_KEY` 또는 `Authorization: Bearer $GUARDRAILS_API_KEY` 필수. 미제공 시 `401 invalid_api_key`. 외부 노출 시 TLS와 함께 사용.
 
 ### `MCP_TRANSPORT=stdio`
 
@@ -135,9 +139,59 @@ npm test
 현재 포함:
 - `orchestrator/__tests__/redact.spec.ts` — sub_category placeholder, 다중 매치 R→L 치환
 
-## Claude Desktop 연동
+## MCP Client 연동
+
+두 가지 등록 방식. Docker로 띄운 원격 서버는 **A (HTTP)**, 클라이언트가 로컬 프로세스를 직접 띄우면 **B (stdio)**.
+
+| Transport | 용도 | Endpoint |
+|---|---|---|
+| **HTTP** (Streamable HTTP) | Docker/원격 배포된 서버를 client에 등록 | `POST http://<host>:8080/mcp` |
+| **stdio** | client가 로컬 바이너리를 직접 spawn | `node dist/main.js` (`MCP_TRANSPORT=stdio`) |
+
+### A. HTTP 서버를 client에 등록 (`mcp-remote`)
+
+`MCP-type-Guardrails-Service`에서 `make up-p1-p2-admin-web`(또는 `up-p1`) 등으로 Docker 기동 시
+Server는 `http://<host>:8080/mcp`에 MCP Streamable HTTP를 노출. Claude Desktop 등 stdio-only
+client는 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 브리지로 연결.
 
 `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "guardrails": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://<서버-IP>:8080/mcp"]
+    }
+  }
+}
+```
+
+- **포트 `8080`** — `MCP_EXPOSED_PORT` 변경 시 맞춰 수정. 경로는 항상 `/mcp`.
+- **인증** — 서버 기본값 `MCP_HTTP_AUTH=optional`이면 위처럼 헤더 없이 연결됨.
+  서버가 `MCP_HTTP_AUTH=required`이면 헤더 추가:
+  ```json
+  "args": ["-y", "mcp-remote", "http://<서버-IP>:8080/mcp",
+           "--header", "x-api-key:dev-key-please-change"]
+  ```
+  > `mcp-remote`는 `key:value`를 첫 `:`에서 분리 → 콜론 뒤 **공백 없이**. `Authorization: Bearer <key>`도 허용.
+- 로컬 단독 실행 시 `http://127.0.0.1:8080/mcp`.
+
+검증 (curl):
+```bash
+# initialize 핸드셰이크 (MCP_HTTP_AUTH=required면 -H 'x-api-key: <key>' 추가)
+curl -s http://<서버-IP>:8080/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+# → {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{...}}}
+
+# 도구 목록
+curl -s http://<서버-IP>:8080/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+### B. stdio (client가 로컬 프로세스 spawn)
+
+Docker 없이 client가 직접 바이너리 실행. 다운스트림 URL을 env로 주입. `npm run build` 선행.
 
 ```json
 {
@@ -158,19 +212,7 @@ npm test
 }
 ```
 
-원격 HTTP/SSE 브리지:
-
-```json
-{
-  "mcpServers": {
-    "guardrails": {
-      "command": "npx",
-      "args": ["mcp-remote", "http://localhost:8080/mcp/sse"],
-      "env": { "GUARDRAILS_API_KEY": "dev-key-please-change" }
-    }
-  }
-}
-```
+stdio는 `ApiKeyGuard`를 우회 (OS 권한으로 채널 격리).
 
 ## 권장 시스템 프롬프트
 
