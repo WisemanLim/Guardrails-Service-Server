@@ -3,8 +3,8 @@ import { createHash } from 'crypto';
 import { PolicyClient, Rule } from '../clients/policy.client';
 import { DetectionClient, DetectionMatch } from '../clients/detection.client';
 import { AuditClient } from '../clients/audit.client';
+import { RedactClient } from '../clients/redact.client';
 import { Runtime } from '../config/runtime';
-import { redact } from './redact';
 import { Decision, ValidateRequest, ValidateResponse } from './types';
 
 const ACTION_TO_DECISION: Record<string, Decision> = {
@@ -39,6 +39,7 @@ export class OrchestratorService {
     private readonly policy: PolicyClient,
     private readonly detection: DetectionClient,
     private readonly audit: AuditClient,
+    private readonly redactor: RedactClient,
   ) {}
 
   async validate(req: ValidateRequest, ioType: 'input' | 'output'): Promise<ValidateResponse> {
@@ -62,13 +63,11 @@ export class OrchestratorService {
     const normalized = detection?.normalized_text ?? text;
     const rules = bundle?.rules ?? [];
 
-    // Map each detection match to the most-strict applicable rule by sub_category.
     const byCat = indexRulesBySubCategory(rules);
     let decision: Decision = 'allow';
     const matchedRuleIds = new Set<string>();
     const categories = new Set<string>();
-    let highestSeverity = 0;
-    let messages: string[] = [];
+    const messages: string[] = [];
 
     for (const m of matches) {
       categories.add(`${m.category}.${m.sub_category}`);
@@ -76,15 +75,11 @@ export class OrchestratorService {
       if (!rule) continue;
       matchedRuleIds.add(rule.ruleId);
       const mapped: Decision = ACTION_TO_DECISION[rule.action] ?? 'warn';
-      if (DECISION_RANK[mapped] > DECISION_RANK[decision]) {
-        decision = mapped;
-        highestSeverity = severityRank(rule.severity);
-      }
+      if (DECISION_RANK[mapped] > DECISION_RANK[decision]) decision = mapped;
       const msg = rule.messageTemplate[locale] ?? rule.messageTemplate.en ?? rule.description;
       if (msg) messages.push(msg);
     }
 
-    // No rule binding but raw detection signal present → default to redact for output, warn for input.
     if (decision === 'allow' && matches.length) {
       decision = ioType === 'output' ? 'redact' : 'warn';
     }
@@ -92,7 +87,7 @@ export class OrchestratorService {
     const redactedText = decision === 'block' || decision === 'escalate'
       ? '[BLOCKED]'
       : matches.length
-      ? redact(normalized, matches)
+      ? await this.redactor.redact(normalized, matches)
       : normalized;
 
     const latencyMs = Date.now() - start;
@@ -136,22 +131,19 @@ export class OrchestratorService {
       .detect(req.text, domains[domains.length - 1] ?? 'global', locale, ioType)
       .catch(() => null);
     const normalized = detection?.normalized_text ?? req.text;
-    const redactedText = detection?.matches?.length ? redact(normalized, detection.matches) : normalized;
+    const redactedText = detection?.matches?.length
+      ? await this.redactor.redact(normalized, detection.matches)
+      : normalized;
     return { normalizedText: normalized, redactedText };
   }
 }
 
 function indexRulesBySubCategory(rules: Rule[]): Map<string, Rule> {
   const out = new Map<string, Rule>();
-  // Highest priority wins (rules are sorted desc but we re-check defensively).
   for (const r of rules) {
     if (!r.subCategory) continue;
     const cur = out.get(r.subCategory);
     if (!cur || r.priority > cur.priority) out.set(r.subCategory, r);
   }
   return out;
-}
-
-function severityRank(s: string): number {
-  return { low: 1, medium: 2, high: 3, critical: 4 }[s] ?? 0;
 }

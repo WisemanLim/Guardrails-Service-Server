@@ -61,7 +61,10 @@ async function dispatch(registry: ToolRegistryService, method: string, params: u
     case 'initialize':
       return {
         protocolVersion: '2025-06-18',
-        serverInfo: { name: 'guardrails-mcp', version: '0.1.0' },
+        serverInfo: {
+          name: process.env.MCP_SERVER_NAME ?? 'guardrails-mcp',
+          version: process.env.MCP_SERVER_VERSION ?? '0.1.0',
+        },
         capabilities: { tools: {} },
       };
     case 'tools/list':
